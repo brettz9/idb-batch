@@ -1,5 +1,8 @@
+import 'babel-polyfill' // Array.prototype.values, etc.
+
 import isPlainObj from 'is-plain-obj'
 import isSafari from 'is-safari'
+import SyncPromise from 'sync-promise'
 
 /**
  * Links to array prototype methods.
@@ -9,7 +12,7 @@ const slice = [].slice
 const map = [].map
 
 /**
- * Perform batch operation using `ops`.
+ * Perform batch operation for a single object store using `ops`.
  *
  * Array syntax:
  *
@@ -27,60 +30,157 @@ const map = [].map
  * 	 key3: null,   // delete key
  * }
  *
- * @param {Array|Object} ops
- * @return {Promise}
+ * @param {Array|Object} ops Operations
+ * @param {Object} opts See `transactionalBatch`
+ * @return {Promise} Resolves to the result of the operations
  */
 
-export default function batch(db, storeName, ops) {
-  if (arguments.length !== 3) throw new TypeError('invalid arguments length')
+export default function batch(db, storeName, ops, opts) {
   if (typeof storeName !== 'string') throw new TypeError('invalid "storeName"')
-  if (!Array.isArray(ops) && !isPlainObj(ops)) throw new TypeError('invalid "ops"')
-  if (isPlainObj(ops)) {
-    ops = Object.keys(ops).map((key) => {
-      return { key, value: ops[key], type: ops[key] === null ? 'del' : 'put' }
-    })
+  if (![3, 4].includes(arguments.length)) throw new TypeError('invalid arguments length')
+  validateAndCanonicalizeOps(ops)
+  return transactionalBatch(db, { [storeName]: ops }, opts).then((arr) => arr[0].map((obj) => obj[storeName]))
+}
+
+export function getStoreNames(storeOpsArr) {
+  if (isPlainObj(storeOpsArr)) storeOpsArr = [storeOpsArr]
+  return storeOpsArr.reduce((storeNames, opObj) => {
+    // This has no effect if the opObj is a function
+    return storeNames.concat(Object.keys(opObj))
+  }, [])
+}
+
+/**
+ * Perform batch operations for any number of object stores using `ops`.
+ *
+ * Array syntax:
+ *
+ * [
+ *   { type: 'add', key: 'key1', val: 'val1' },
+ *   { type: 'put', key: 'key2', val: 'val2' },
+ *   { type: 'del', key: 'key3' },
+ * ]
+ *
+ * Object syntax:
+ *
+ * {
+ * 	 key1: 'val1', // put val1 to key1
+ * 	 key2: 'val2', // put val2 to key2
+ * 	 key3: null,   // delete key
+ * }
+ *
+ * @param {IDBDatabase|IDBTransaction} tr IndexedDB database or transaction on which the batch will operate
+ * @param {Array|Object} storeOpsArr Array of objects (or a single object) whose keys are store names and objects are idb-batch operations (object or array)
+ * @param {Object} [opts] Options object
+ * @property {Boolean} opts.parallel=false Whether or not to load in parallel
+ * @property {Array} opts.extraStores=[]] A list of store names to add to the transaction (when `tr` is an `IDBDatabase` object)
+ * @return {Promise} Resolves to an array containing the results of the operations for each store
+ */
+
+export function transactionalBatch(tr, storeOpsArr, opts = { parallel: false, extraStores: [] }) {
+  if (![2, 3].includes(arguments.length)) throw new TypeError('invalid arguments length')
+  if (isPlainObj(storeOpsArr)) storeOpsArr = [storeOpsArr]
+  const storeOpsArrIter = storeOpsArr.values()
+  if (typeof tr.createObjectStore === 'function') {
+    tr = tr.transaction(getStoreNames(storeOpsArr).concat(opts.extraStores), 'readwrite')
   }
-  ops.forEach((op) => {
-    if (!isPlainObj(op)) throw new TypeError('invalid op')
-    if (['add', 'put', 'del'].indexOf(op.type) === -1) throw new TypeError(`invalid type "${op.type}"`)
-  })
-
-  return new Promise((resolve, reject) => {
-    const tr = db.transaction(storeName, 'readwrite')
-    const store = tr.objectStore(storeName)
+  return new SyncPromise((resolve, reject) => {
     const results = []
-    let currentIndex = 0
-
     tr.onerror = handleError(reject)
     tr.oncomplete = () => resolve(results)
-    next()
 
-    function next() {
-      const { type, key } = ops[currentIndex]
-      if (type === 'del') return request(store.delete(key))
-
-      const val = ops[currentIndex].val || ops[currentIndex].value
-      if (key && store.keyPath) val[store.keyPath] = key
-
-      countUniqueIndexes(store, key, val, (err, uniqueRecordsCounter) => {
-        if (err) return reject(err)
-
-        // we don't abort transaction here, and just stops execution
-        // browsers implementation also don't abort, and just throw an error
-        if (uniqueRecordsCounter) return reject(new Error('Unique index ConstraintError'))
-        request(store.keyPath ? store[type](val) : store[type](val, key))
-      })
+    if (opts.parallel) {
+      return
     }
 
-    function request(req) {
-      currentIndex += 1
+    let iterateStoreOps
+    const iterateStores = (storeOpsVals, storeOpsObj) => {
+      if (typeof storeOpsObj === 'function') {
+        storeOpsObj(tr)
+        iterateStoreOps()
+        return
+      }
+      const storeOpIter = storeOpsVals.next()
+      if (storeOpIter.done) {
+        iterateStoreOps()
+        return
+      }
+      const storeName = storeOpIter.value
+      const storeResults = []
 
-      req.onerror = handleError(reject)
-      req.onsuccess = (e) => {
-        results.push(e.target.result)
-        if (currentIndex < ops.length) next()
+      let ops = storeOpsObj[storeName]
+      try {
+        ops = validateAndCanonicalizeOps(ops)
+      } catch (err) {
+        reject(err)
+        return
+      }
+
+      const store = tr.objectStore(storeName)
+      let currentIndex = 0
+
+      next()
+
+      function next() {
+        const { type, key } = ops[currentIndex]
+        if (type === 'clear') {
+          request(storeName, store.clear())
+          return
+        }
+        if (type === 'del') {
+          request(storeName, store.delete(key))
+          return
+        }
+        const val = ops[currentIndex].val || ops[currentIndex].value
+        if (['move', 'copy'].includes(type)) {
+          const req = store.get(val)
+          req.onerror = handleError(reject)
+          req.onsuccess = (e) => {
+            ops.splice(currentIndex, 0, { type: 'put', key, value: e.target.result })
+            if (type === 'move') {
+              ops.splice(currentIndex + 1, 0, { type: 'delete', key: val })
+            }
+            next()
+          }
+          return
+        }
+        if (key && store.keyPath) val[store.keyPath] = key
+
+        countUniqueIndexes(store, key, val, (err, uniqueRecordsCounter) => {
+          if (err) return reject(err)
+
+          // We don't abort transaction here (we just stop execution)
+          // Browsers' implementations also don't abort, and instead just throw an error
+          if (uniqueRecordsCounter) return reject(new Error('Unique index ConstraintError'))
+          request(storeName, store.keyPath ? store[type](val) : store[type](val, key))
+        })
+      }
+
+      function request(storeNm, req) {
+        currentIndex++
+
+        req.onerror = handleError(reject)
+        req.onsuccess = (e) => {
+          storeResults.push({ [storeNm]: e.target.result })
+          if (currentIndex < ops.length) next()
+          else {
+            results.push(storeResults)
+            iterateStores(storeOpsVals, storeOpsObj)
+          }
+        }
       }
     }
+
+    iterateStoreOps = () => {
+      let storeOpsObj = storeOpsArrIter.next()
+      if (storeOpsObj.done) {
+        return
+      }
+      storeOpsObj = storeOpsObj.value
+      const storeOpsVals = Object.keys(storeOpsObj).values()
+      iterateStores(storeOpsVals, storeOpsObj)
+    }
+    iterateStoreOps()
   })
 }
 
@@ -103,7 +203,7 @@ function countUniqueIndexes(store, key, val, cb) {
   const indexes = slice.call(store.indexNames).map((indexName) => {
     const index = store.index(indexName)
     const indexVal = isCompound(index)
-    ? map.call(index.keyPath, (indexKey) => val[indexKey]).filter((v) => Boolean(v))
+    ? map.call(index.keyPath, (indexKey) => val[indexKey]).filter((v) => v)
     : val[index.keyPath]
 
     return [index, indexVal]
@@ -120,8 +220,8 @@ function countUniqueIndexes(store, key, val, cb) {
     const req = index.getKey(indexVal) // get primaryKey to compare with updating value
     req.onerror = handleError(cb)
     req.onsuccess = (e) => {
-      if (e.target.result && e.target.result !== key) uniqueRecordsCounter += 1
-      totalRequestsCounter -= 1
+      if (e.target.result && e.target.result !== key) uniqueRecordsCounter++
+      totalRequestsCounter--
       if (totalRequestsCounter === 0) cb(null, uniqueRecordsCounter)
     }
   })
@@ -151,4 +251,30 @@ function handleError(cb) {
     if (typeof e.preventDefault === 'function') e.preventDefault()
     cb(e.target.error)
   }
+}
+
+/**
+ * Validate operations and canonicalize them into an array.
+ *
+ * @param {Array|Object} ops
+ * @return {Array} Canonicalized operations array
+ */
+
+function validateAndCanonicalizeOps(ops) {
+  if (ops === 'clear') {
+    ops = [{ type: 'clear' }]
+  }
+  if (!Array.isArray(ops) && !isPlainObj(ops)) {
+    throw new TypeError('invalid "ops"')
+  }
+  if (isPlainObj(ops)) {
+    ops = Object.keys(ops).map((key) => {
+      return { key, value: ops[key], type: ops[key] === null ? 'del' : 'put' }
+    })
+  }
+  ops.forEach((op) => {
+    if (!isPlainObj(op)) throw new TypeError('invalid op')
+    if (['add', 'put', 'del', 'move', 'copy', 'clear'].indexOf(op.type) === -1) throw new TypeError(`invalid type "${op.type}"`)
+  })
+  return ops
 }

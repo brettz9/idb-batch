@@ -1,7 +1,7 @@
 // setup PhantomJS, Webkit, IE env
 import 'polyfill-function-prototype-bind'
 import 'indexeddbshim'
-import 'regenerator/runtime'
+import 'regenerator-runtime-only/runtime'
 import ES6Promise from 'es6-promise'
 
 ES6Promise.polyfill()
@@ -16,9 +16,9 @@ import { request } from 'idb-request'
 import Schema from 'idb-schema'
 import batch from '../src'
 
-describe('idb-schema', () => {
+describe('idb-batch', () => {
   let db
-  const dbName = 'idb-schema'
+  const dbName = 'idb-batch'
   const schema = new Schema()
   .addStore('books')
   .addIndex('byTitle', 'title', { unique: true }) // simple index
@@ -82,6 +82,10 @@ describe('idb-schema', () => {
     expect(res2).eql([undefined, 2, undefined])
     expect(await count(db, 'magazines')).equal(2)
     expect(await get(db, 'magazines', 2)).eql({ id: 2, name: 'M2', frequency: 24, foo: 'bar' })
+
+    const res3 = await batch(db, 'magazines', [{ type: 'clear' }])
+    expect(res3).eql([undefined])
+    expect(await count(db, 'magazines')).equal(0)
   })
 
   it('works with any type of data (not only objects)', async () => {

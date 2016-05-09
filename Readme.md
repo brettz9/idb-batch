@@ -42,14 +42,22 @@ function upgradeCallback(e) {
 }
 ```
 
-### batch(db: IDBDatabase, storeName: String, ops: Array|Object)
+### transactionalBatch(tr: IDBDatabase|IDBTransaction, storeOpsArr, opts = { parallel: false, extraStores: [] })
 
-This creates a `readwrite` transaction to `storeName`,
-and performs `ops` sequentially. It returns a `Promise` which resolves with the results of each request.
+To-do
+
+### batch(db: IDBDatabase|IDBTransaction, storeName: String, ops: Array|Object, opts: { parallel: false, extraStores: [] })
+
+This creates a `readwrite` transaction to `storeName`, and performs `ops`
+sequentially. It returns a `Promise` which resolves with the results of
+each request.
 
 **Array notation** is inspired by [LevelUP](https://github.com/Level/levelup#batch).
 Each operation is an object with 3 possible properties: `type`, `key`, `value`.
-`type` is either `add`, `put`, or `del`, and `key` is optional (when the store has a `keyPath` and the supplied value contains it).
+`type` is either `add`, `put`, `del`, `move`, `copy`, or `clear`, and `key` is
+optional when the store has a `keyPath` and the supplied value contains it.
+When `move` or `copy` is used, the `key` represents the new destination of
+the operation and `value` represents the old key from which to move or copy.
 
 ```js
 await batch(db, 'books', [
@@ -59,8 +67,8 @@ await batch(db, 'books', [
 ])
 ```
 
-**Object notation** is sugar on top of array notation for `put`/`del` operations.
-Set `key` to `null` in order to delete a value.
+**Object notation** is sugar on top of array notation for `put`/`del`
+operations. Set `key` to `null` in order to delete a value.
 
 ```js
 await batch(db, 'storage', {
@@ -70,12 +78,17 @@ await batch(db, 'storage', {
 })
 ```
 
+### getStoreNames(storeOps: Array|Object)
+
+Gets the store names for a set of store operations as an array.
+
 ### ConstraintError
 
-If during sequential execution one of the operations throws a `ConstraintError`,
-the `Promise` rejects with an error, but previous successful operations will commit.
-This behavior may change in future versions,
-as I figure out how to properly abort transactions in IndexedDBShim.
+If during sequential execution one of the operations throws a
+`ConstraintError`, the `Promise` rejects with an error, but previous
+successful operations will commit.
+This behavior may change in future versions, as I figure out how to
+properly abort transactions in `IndexedDBShim`.
 
 ## LICENSE
 
