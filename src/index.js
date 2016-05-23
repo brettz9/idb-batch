@@ -2,6 +2,7 @@ import 'babel-polyfill' // Array.prototype.values, etc.
 
 import isPlainObj from 'is-plain-obj'
 import isSafari from 'is-safari'
+import SyncPromise from 'sync-promise'
 
 /**
  * Links to array prototype methods.
@@ -9,6 +10,14 @@ import isSafari from 'is-safari'
 
 const slice = [].slice
 const map = [].map
+
+SyncPromise.reject = function SyncPromiseReject(val) {
+  return new SyncPromise((resolve, reject) => {
+    setTimeout(() => {
+      reject(val)
+    })
+  })
+}
 
 /**
  * Perform batch operation for a single object store using `ops`.
@@ -31,16 +40,16 @@ const map = [].map
  *
  * @param {Array|Object} ops Operations
  * @param {Object} opts See `transactionalBatch`
- * @return {Promise} Resolves to the result of the operations
+ * @return {SyncPromise} Resolves to the result of the operations
  */
 
 export default function batch(db, storeName, ops, opts) {
-  if (typeof storeName !== 'string') return Promise.reject(new TypeError('invalid "storeName"'))
-  if (![3, 4].includes(arguments.length)) return Promise.reject(new TypeError('invalid arguments length'))
+  if (typeof storeName !== 'string') return SyncPromise.reject(new TypeError('invalid "storeName"'))
+  if (![3, 4].includes(arguments.length)) return SyncPromise.reject(new TypeError('invalid arguments length'))
   try {
     validateAndCanonicalizeOps(ops)
   } catch (err) {
-    return Promise.reject(err)
+    return SyncPromise.reject(err)
   }
   return transactionalBatch(db, { [storeName]: ops }, opts).then((arr) => arr[0][storeName])
 }
@@ -79,18 +88,18 @@ export function getStoreNames(storeOpsArr) {
  * @property {Boolean} [opts.resolveEarly=false] Whether or not to resolve the promise before the transaction ends
  * @property {Array} [opts.extraStores=[]] A list of store names to add to the transaction (when `tr` is an `IDBDatabase` object)
  * @property {Function} [opts.adapterCb=null] A callback which will be supplied the `tr` and function of a function-type operation)
- * @return {Promise} Resolves to an array containing the results of the operations for each store
+ * @return {SyncPromise} Resolves to an array containing the results of the operations for each store
  */
 
 export function transactionalBatch(tr, storeOpsArr, opts = { parallel: false, extraStores: [], resolveEarly: false, adapterCb: null }) {
-  if (![2, 3].includes(arguments.length)) return Promise.reject(new TypeError('invalid arguments length'))
+  if (![2, 3].includes(arguments.length)) return SyncPromise.reject(new TypeError('invalid arguments length'))
   if (isPlainObj(storeOpsArr)) storeOpsArr = [storeOpsArr]
   const storeOpsArrIter = storeOpsArr.keys()
   opts = opts || {}
   if (typeof tr.createObjectStore === 'function') {
     tr = tr.transaction(getStoreNames(storeOpsArr).concat(opts.extraStores || []), 'readwrite')
   }
-  return new Promise((resolve, reject) => {
+  return new SyncPromise((resolve, reject) => {
     const results = []
     tr.addEventListener('error', handleError(reject))
     tr.addEventListener('abort', handleError(reject))
